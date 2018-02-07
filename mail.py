@@ -105,6 +105,7 @@ class Mailer():
         #index +1 is len
         else:
             _download_list = list(set(messages).difference(set(_history)))
+            _download_list.reverse()
         if len(_download_list)<=0:
             #nothing to do
             logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!', user,
@@ -128,7 +129,7 @@ class Mailer():
                     sys.stdout.flush()
                     self._handle(user, name, msg_id, data)
                     time.sleep(0.1)
-                self.cache[_key] = messages[0:end]
+                self.cache[_key].update(messages[0:end])
                 self._flush_meta(key=_key)
         else:
             response = conn.fetch(_download_list, ['BODY.PEEK[]'])
@@ -138,7 +139,7 @@ class Mailer():
                 sys.stdout.flush()
                 self._handle(user, name, msg_id, data)
                 time.sleep(0.1)
-            self.cache[_key] = messages
+            self.cache[_key].update(messages)
             self._flush_meta(key=_key)
         sys.stdout.write("\n")
         #conn.unselect_folder()
@@ -195,7 +196,7 @@ class Mailer():
         cache = {}
         for f in os.listdir(mp):
             with open(mp + '/' + f, 'r') as ff:
-                cache[f.replace('.meta','')] = [int(x) if x!='' else -10000 for x in str(ff.read()).split(',')]
+                cache[f.replace('.meta','')] = set([int(x) if x!='' else -10000 for x in str(ff.read()).split(',')])
         return cache
 
     def _flush_meta(self,key=None):
