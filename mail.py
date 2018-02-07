@@ -34,7 +34,14 @@ def _fix_name(filename):
 
 
 class Mailer():
-    def __init__(self, root=None, imap=None, ssl=False, groups=None, **users):
+    def __init__(self,
+                 root=None,
+                 imap=None,
+                 ssl=False,
+                 groups=None,
+                 poolsize=10,
+                 pagesize=100,
+                 **users):
         self.root = root
         self.imap = imap
         self.users = users
@@ -43,8 +50,9 @@ class Mailer():
         self.port = 143
         self.cache = None
         self.groups = groups
+        self.pagesize = pagesize
         #the max size is 10
-        self.tp = ThreadPool(10)
+        self.tp = ThreadPool(poolsize)
 
     def _list_all_clients(self):
         hosts = self.imap.split(':')
@@ -102,10 +110,10 @@ class Mailer():
         print('\n' + self._get_dir(user) + '/' + name + ':')
         sys.stdout.write("\r%d/%d" % (index, len(messages[ii:])))
         sys.stdout.flush()
-        if len(messages[ii:]) > 100:
+        if len(messages[ii:]) > self.pagesize:
             messages = messages[ii:]
             while len(messages) > index:
-                end = index + 100
+                end = index + self.pagesize
                 old = index
                 if len(messages) < end:
                     end = len(messages)
@@ -178,12 +186,10 @@ class Mailer():
             with open(eml, 'wb') as f:
                 f.write(data)
                 f.flush()
-                f.close()
         except IOError as e:
             logger.error('write file failed %s', e.message)
             #save again
-            self._save(user, mbox, _date, uid, 'SubjectWithInvalidCharacter',
-                       data)
+            self._save(user, mbox, _date, uid, 'InvalidFile', data)
 
     def _load_meta(self):
         mp = u'{0}/.meta'.format(self.root)
@@ -279,5 +285,16 @@ if __name__ == '__main__':
         mapping[g] = ini.get('group', g).split(',')
     imap = ini.get('mailer', 'imap')
     ssl = ini.getboolean('mailer', 'ssl')
-    m = Mailer(root=dp, imap=imap, ssl=ssl, groups=mapping, **users)
+    pagesize = 100 if ini.getint('mailer', 'pagesize') == 0 else ini.getint(
+        'mailer', 'pagesize')
+    poolsize = 10 if ini.getint('mailer', 'poolsize') == 0 else ini.getint(
+        'mailer', 'poolsize')
+    m = Mailer(
+        root=dp,
+        imap=imap,
+        ssl=ssl,
+        groups=mapping,
+        pagesize=pagesize,
+        poolsize=poolsize,
+        **users)
     m.download()
