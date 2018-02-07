@@ -22,7 +22,8 @@ formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
-
+#for windows hidden attr
+FILE_ATTRIBUTE_HIDDEN = 0x02
 PATH_SPECIAL_CHARS = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
 
 
@@ -39,8 +40,8 @@ class Mailer():
                  imap=None,
                  ssl=False,
                  groups=None,
-                 poolsize=10,
-                 pagesize=100,
+                 poolsize=0x0a,
+                 pagesize=0x64,
                  **users):
         self.root = root
         self.imap = imap
@@ -209,6 +210,7 @@ class Mailer():
     def _flush_meta(self):
         mp = u'{0}/.meta'.format(self.root)
         self._mkdir(mp)
+        self._hidden(mp)
         tmp = {}
         for key, value in self.cache.items():
             splits = key.split('-')
@@ -221,6 +223,17 @@ class Mailer():
                     f.write(vv.encode('utf-8'))
                     f.write("\n")
                 f.flush()
+
+    def _hidden(self, path):
+        if os.name == 'nt':
+            import ctypes
+            ret = ctypes.windll.kernel32.SetFileAttributesW(
+                ur'{0}'.format(path), FILE_ATTRIBUTE_HIDDEN)
+            if ret:
+                logger.debug('hidden success')
+        #do nothing
+        else:
+            logger.debug('os is unix like system, do nothing')
 
     def _mkdir(self, path, mode=755):
         if os.path.exists(path):
@@ -285,9 +298,9 @@ if __name__ == '__main__':
         mapping[g] = ini.get('group', g).split(',')
     imap = ini.get('mailer', 'imap')
     ssl = ini.getboolean('mailer', 'ssl')
-    pagesize = 100 if ini.getint('mailer', 'pagesize') == 0 else ini.getint(
+    pagesize = 0x64 if ini.getint('mailer', 'pagesize') == 0 else ini.getint(
         'mailer', 'pagesize')
-    poolsize = 10 if ini.getint('mailer', 'poolsize') == 0 else ini.getint(
+    poolsize = 0x0a if ini.getint('mailer', 'poolsize') == 0 else ini.getint(
         'mailer', 'poolsize')
     m = Mailer(
         root=dp,
