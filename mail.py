@@ -181,7 +181,7 @@ class Mailer():
     def _save(self, user, mbox, _date, uid, subject, data):
         self._mkdir(self.root, mode=777)
         p = u'{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
-                                            mbox, _date.strftime('%y-%m-%d'))
+                                            mbox, _date.strftime('%Y-%m-%d'))
         self._mkdir(p, mode=777)
         eml = u'{0}/{1}-{2}.eml'.format(p, uid, _fix_name(subject))
         try:
