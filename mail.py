@@ -102,6 +102,8 @@ class Mailer():
         if _history is None:
             #download list
             self.cache[_key] = set()
+            _download_list = list(_download_list)
+            _download_list.reverse()
         #index +1 is len
         else:
             _download_list = list(set(messages).difference(set(_history)))
@@ -115,13 +117,13 @@ class Mailer():
         sys.stdout.write("\r%d/%d" % (index, len(_download_list)))
         sys.stdout.flush()
         if len(_download_list) > self.pagesize:
-            while len(messages) > index:
+            while len(_download_list) > index:
                 end = index + self.pagesize
                 old = index
                 if len(_download_list) < end:
                     end = len(_download_list)
                 #unmark read message
-                response = conn.fetch(messages[index:end], ['BODY.PEEK[]'])
+                response = conn.fetch(_download_list[index:end], ['BODY.PEEK[]'])
                 index = end
                 for msg_id, data in response.items():
                     old = old + 1
@@ -129,7 +131,7 @@ class Mailer():
                     sys.stdout.flush()
                     self._handle(user, name, msg_id, data)
                     time.sleep(0.1)
-                self.cache[_key].update(messages[0:end])
+                self.cache[_key].update(_download_list[0:end])
                 self._flush_meta(key=_key)
         else:
             response = conn.fetch(_download_list, ['BODY.PEEK[]'])
@@ -139,7 +141,7 @@ class Mailer():
                 sys.stdout.flush()
                 self._handle(user, name, msg_id, data)
                 time.sleep(0.1)
-            self.cache[_key].update(messages)
+            self.cache[_key].update(_download_list)
             self._flush_meta(key=_key)
         sys.stdout.write("\n")
         #conn.unselect_folder()
