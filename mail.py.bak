@@ -9,6 +9,7 @@ import logging
 import argparse
 import ConfigParser
 import sys
+import json
 from imapclient import IMAPClient
 from multiprocessing.pool import ThreadPool
 
@@ -32,6 +33,41 @@ def _fix_name(filename):
     for s in PATH_SPECIAL_CHARS:
         fix = fix.replace(s, '-')
     return fix
+
+
+# class Meta():
+#     def __init__(self, newest, segment=None):
+#         self.newest = newest
+#         self.segments = []
+#         if segment is not None:
+#             self.segments.append(segment)
+
+#     def add(self, segment):
+#         if segment is None:
+#             return
+#         self.segments.append(segment)
+
+#     def remove(self, segment):
+#         if segment is None:
+#             return
+#         self.segments.remove(segment)
+
+#     def list_segments(self):
+#         return self.segments
+
+#     def get_dict(self):
+#         return {'newest': self.newest, 'segments': self.segments}
+
+
+# class MetaEncoder(json.JSONEncoder):
+#     def __init__(self, **kwargs):
+#         super(MetaEncoder, self).__init__(**kwargs)
+
+#     def default(self, obj):
+#         if isinstance(obj, Meta):
+#             return obj.get_dict()
+#         #call parent
+#         return super(MetaEncoder, self).default(obj)
 
 
 class Mailer():
@@ -94,54 +130,115 @@ class Mailer():
     def _download(self, user, name, conn):
         conn.select_folder(name)
         messages = conn.search()
+        messages.reverse()
         #split for many segment
-        _key = u'{0}-{1}'.format(user, name)
-        _history = self.cache.get(_key, None)
-        _download_list = messages
-        index = 0  
-        if _history is None:
-            #download list
-            self.cache[_key] = set()
-        #index +1 is len
+        meta = self.cache.get(u'{0}-{1}'.format(user, name), None)
+        index = 0
+        ii = 0
+        start = 0
+        if meta is None:
+            start = 0
+            meta = Meta(messages[0])
+            #init
+            self.cache[u'{0}-{1}'.format(user, name)] = meta
+            #set to max
+            ii = len(messages)
         else:
-            _download_list = list(set(messages).difference(set(_history)))
-        if len(_download_list)<=0:
-            #nothing to do
-            logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!', user,
-                        name)
-            return
+            ii = self._get_index(meta.newest, messages)
+            #index +1 is len
+            if ii == 0:
+                #nothing to do
+                logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!',
+                            user, name)
+                return
+            if ii == -1:
+                #read from newest?
+                ii = 0
         print('\n' + self._get_dir(user) + '/' + name + ':')
-        sys.stdout.write("\r%d/%d" % (index, len(_download_list)))
+        sys.stdout.write("\r%d/%d" % (index, len(messages[ii:])))
         sys.stdout.flush()
-        if len(_download_list) > self.pagesize:
-            while len(messages) > index:
+        if len(messages[0:ii]) > self.pagesize:
+            _messages = messages[0:ii]
+            old = None
+            while len(_messages) > index:
                 end = index + self.pagesize
-                old = index
-                if len(_download_list) < end:
-                    end = len(_download_list)
+                _old = index
+                if len(_messages) < end:
+                    end = len(_messages)
                 #unmark read message
-                response = conn.fetch(messages[index:end], ['BODY.PEEK[]'])
+                response = conn.fetch(_messages[index:end], ['BODY.PEEK[]'])
                 index = end
                 for msg_id, data in response.items():
-                    old = old + 1
-                    sys.stdout.write("\r%d/%d" % (old, len(_download_list)))
+                    _old = _old + 1
+                    sys.stdout.write("\r%d/%d" % (_old, len(_messages)))
                     sys.stdout.flush()
                     self._handle(user, name, msg_id, data)
                     time.sleep(0.1)
-                self.cache[_key] = messages[0:end]
-                self._flush_meta(key=_key)
+                self.cache[u'{0}-{1}'.format(user, name)].remove(old)
+                if _messages[end] != _messages[-1]:
+                    new_segment = (_messages[end], _messages[-1])
+                    self.cache[u'{0}-{1}'.format(user, name)].add(new_segment)
+                    old = new_segment
+                self._flush_meta()
+            #if has any segment do again
+            for ss in meta.list_segments():
+                begin = self._get_index(ss[0])
+                end = self._get_index(ss[1])
+                if begin - end <= self.pagesize:
+                    _index = 0
+                    rsp = conn.fetch(_messages[begin, end], ['BODY.PEEK[]'])
+                    for msg_id, data in response.items():
+                        sys.stdout.write("\r%d/%d" % (_index, begin - end))
+                        _index += 1
+                        sys.stdout.flush()
+                        self._handle(user, name, msg_id, data)
+                        time.sleep(0.1)
+                    meta.remove(ss)
+                else:
+                    _index = 0
+                    _olds = ss
+                    while begin - end > _index:
+                        if _index + self.pagesize > begin - end:
+                            _end = self.pagesize
+                        else:
+                            _end = _index + self.pagesize
+                        rsp = conn.fetch(_messages[begin, end],
+                                         ['BODY.PEEK[]'])
+                        for msg_id, data in response.items():
+                            sys.stdout.write("\r%d/%d" % (_index, begin - end))
+                            _index += 1
+                            sys.stdout.flush()
+                            self._handle(user, name, msg_id, data)
+                            time.sleep(0.1)
+                        _index = _end
+                        self.cache[u'{0}-{1}'.format(user, name)].remove(_olds)
+                        if _index < begin - end:
+                            nn = (_end, end)
+                            self.cache[u'{0}-{1}'.format(user, name)].add(nn)
+                            _olds = nn
+                        self._flush_meta()
         else:
-            response = conn.fetch(_download_list, ['BODY.PEEK[]'])
+            _messages = messages[ii:]
+            response = conn.fetch(_messages, ['BODY.PEEK[]'])
             for msg_id, data in response.items():
                 index = index + 1
-                sys.stdout.write("\r%d/%d" % (index, len(_download_list)))
+                sys.stdout.write("\r%d/%d" % (index, len(_messages)))
                 sys.stdout.flush()
                 self._handle(user, name, msg_id, data)
                 time.sleep(0.1)
-            self.cache[_key] = messages
-            self._flush_meta(key=_key)
+            self.cache[u'{0}-{1}'.format(user, name)] = Meta(_messages[0])
+            self._flush_meta()
         sys.stdout.write("\n")
+
         #conn.unselect_folder()
+    def _get_index(self, start, messages):
+        for index in range(0, len(messages)):
+            if int(messages[index]) == int(start):
+                return index
+            if int(messages[index]) < int(start):
+                #start from current index
+                return index
+        return -1
 
     def _handle(self, user, name, msg_id, data):
         #RFC822
@@ -161,9 +258,8 @@ class Mailer():
         clients = self._list_all_clients()
         handlers = []
         for u, c in clients.items():
-            #self._wrap_download(c,u)
             handlers.append(
-               self.tp.apply_async(self._wrap_download, args=(c, u)))
+                self.tp.apply_async(self._wrap_download, args=(c, u)))
         #wait for ok
         for h in handlers:
             h.get()
@@ -175,10 +271,10 @@ class Mailer():
             self._download(u, b, c)
 
     def _save(self, user, mbox, _date, uid, subject, data):
-        self._mkdir(self.root, mode=0777)
+        self._mkdir(self.root, mode=777)
         p = u'{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
                                             mbox, _date.strftime('%Y-%m-%d'))
-        self._mkdir(p, mode=0777)
+        self._mkdir(p, mode=777)
         eml = u'{0}/{1}-{2}.eml'.format(p, uid, _fix_name(subject))
         try:
             with open(eml, 'wb') as f:
@@ -191,31 +287,22 @@ class Mailer():
 
     def _load_meta(self):
         mp = u'{0}/.meta'.format(self.root)
-        self._mkdir(mp, mode=0777)
+        self._mkdir(mp, mode=777)
         cache = {}
         for f in os.listdir(mp):
             with open(mp + '/' + f, 'r') as ff:
-                cache[f.replace('.meta','')] = [int(x) if x!='' else -10000 for x in str(ff.read()).split(',')]
+                self.cache[f.replace('.meta', '')] = json.loads(
+                    str(ff.read()), encoding='utf-8')
         return cache
 
-    def _flush_meta(self,key=None):
+    def _flush_meta(self):
         mp = u'{0}/.meta'.format(self.root)
         self._mkdir(mp)
         self._hidden(mp)
-        if key is not None:
-            value = self.cache.get(key,None)
-            if value is None:
-                return
-            with open(mp+'/'+key+'.meta','w+') as f:
-                f.write(','.join(str(x) for x in value))
+        for key, value in self.cache.items():
+            with open(mp + '/' + key + '.meta', 'w+') as f:
+                f.write(json.dumps(value, encoding='utf-8'))
                 f.flush()
-        else:
-            #flush all
-            for k, v in self.cache.items():
-                with open(mp+'/'+k+'.meta', 'w+') as f:
-                    f.write(','.join(str(x) for x in v))
-                    f.flush()
-        
 
     def _hidden(self, path):
         if os.name == 'nt':
@@ -228,7 +315,7 @@ class Mailer():
         else:
             logger.debug('os is unix like system, do nothing')
 
-    def _mkdir(self, path, mode=0777):
+    def _mkdir(self, path, mode=755):
         if os.path.exists(path):
             return
         os.makedirs(path, mode)
