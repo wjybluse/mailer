@@ -143,8 +143,9 @@ class Mailer():
         for index in range(0, len(messages)):
             if int(messages[index]) == int(start):
                 return index
-            if messages[index] > start:
-                return index - 1
+            if int(messages[index]) > int(start):
+                #start from current index
+                return index
         return 0
 
     def _handle(self, user, name, msg_id, data):
