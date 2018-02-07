@@ -1,5 +1,5 @@
 #-*- coding:utf-8 -*-
-from imapclient import IMAPClient
+
 import os
 import email
 import email.header
@@ -9,17 +9,28 @@ import logging
 import argparse
 import ConfigParser
 import sys
+from imapclient import IMAPClient
+from multiprocessing.pool import ThreadPool
 
 logger = logging.getLogger('mailer')
 logger.setLevel(logging.DEBUG)
 
 #set to stdout
-ch = logging.StreamHandler(sys.stdout)
+ch = logging.FileHandler('mailer.log')
 ch.setLevel(logging.DEBUG)
 formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
+
+PATH_SPECIAL_CHARS = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
+
+
+def _fix_name(filename):
+    fix = filename
+    for s in PATH_SPECIAL_CHARS:
+        fix = fix.replace(s, '-')
+    return fix
 
 
 class Mailer():
@@ -32,6 +43,8 @@ class Mailer():
         self.port = 143
         self.cache = None
         self.groups = groups
+        #the max size is 10
+        self.tp = ThreadPool(10)
 
     def _list_all_clients(self):
         hosts = self.imap.split(':')
@@ -56,10 +69,11 @@ class Mailer():
                         })
                 conn.login(u, p)
                 cache[u] = conn
-                return cache
             except Exception as e:
                 logger.error('create imap client failed %s', e.message)
                 raise IOError(e.message)
+        #return all clients
+        return cache
 
     def _list_mailbox(self, conn):
         mailboxes = []
@@ -79,28 +93,46 @@ class Mailer():
             start = 0
         else:
             ii = self._get_index(start, messages)
+        #index +1 is len
+        if ii + 1 >= len(messages):
+            #nothing to do
+            logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!', user,
+                        name)
+            return
+        print('\n' + self._get_dir(user) + '/' + name + ':')
+        sys.stdout.write("\r%d/%d" % (index, len(messages[ii:])))
+        sys.stdout.flush()
         if len(messages[ii:]) > 100:
             messages = messages[ii:]
             while len(messages) > index:
                 end = index + 100
+                old = index
                 if len(messages) < end:
                     end = len(messages)
                 #unmark read message
                 response = conn.fetch(messages[index:end], ['BODY.PEEK[]'])
                 index = end
                 for msg_id, data in response.items():
+                    old = old + 1
+                    sys.stdout.write("\r%d/%d" % (old, len(messages[ii:])))
+                    sys.stdout.flush()
                     self._handle(user, name, msg_id, data)
+                    time.sleep(0.1)
         else:
             response = conn.fetch(messages[ii:], ['BODY.PEEK[]'])
             for msg_id, data in response.items():
+                index = index + 1
+                sys.stdout.write("\r%d/%d" % (index, len(messages[ii:])))
+                sys.stdout.flush()
                 self._handle(user, name, msg_id, data)
+                time.sleep(0.1)
         if len(messages) > 0:
             self.cache[u'{0}-{1}'.format(user, name)] = messages[-1]
+        sys.stdout.write("\n")
         #conn.unselect_folder()
-
     def _get_index(self, start, messages):
-        for index in range(0, messages):
-            if messages[index] == start:
+        for index in range(0, len(messages)):
+            if int(messages[index]) == int(start):
                 return index
             if messages[index] > start:
                 return index - 1
@@ -122,20 +154,26 @@ class Mailer():
     def download(self):
         self.cache = self._load_meta()
         clients = self._list_all_clients()
-        tasks = []
+        handlers = []
         for u, c in clients.items():
-            boxes = self._list_mailbox(c)
-            for b in boxes:
-                self._download(u, b, c)
+            handlers.append(
+                self.tp.apply_async(self._wrap_download, args=(c, u)))
         #wait for ok
+        for h in handlers:
+            h.get()
         self._flush_meta()
+
+    def _wrap_download(self, c, u):
+        boxes = self._list_mailbox(c)
+        for b in boxes:
+            self._download(u, b, c)
 
     def _save(self, user, mbox, _date, uid, subject, data):
         self._mkdir(self.root, mode=777)
         p = u'{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
                                             mbox, _date.strftime('%y-%m-%d'))
         self._mkdir(p, mode=777)
-        eml = u'{0}/{1}-{2}.eml'.format(p, uid, subject)
+        eml = u'{0}/{1}-{2}.eml'.format(p, uid, _fix_name(subject))
         try:
             with open(eml, 'wb') as f:
                 f.write(data)
@@ -157,8 +195,9 @@ class Mailer():
                     splits = line.split(':')
                     if len(splits) < 2:
                         continue
-                    cache[u'{0}-{1}'.format(f.replace('.meta', ''),
-                                            splits[0])] = splits[1]
+                    cache[u'{0}-{1}'.format(
+                        f.replace('.meta', ''),
+                        splits[0].decode('utf-8'))] = splits[1]
         return cache
 
     def _flush_meta(self):
@@ -168,13 +207,14 @@ class Mailer():
         for key, value in self.cache.items():
             splits = key.split('-')
             if not tmp.get(splits[0], None):
-                tmp[splits[0]] = set()
-            tmp[splits[0]].add('{0}:{1}'.format(splits[0], value))
+                tmp[splits[0]] = list()
+            tmp[splits[0]].append(splits[1] + ":" + str(value))
         for k, v in tmp.items():
-            with open(mp + '/' + k + '.meta', 'wb') as f:
-                f.write("\n".join(v))
+            with open(mp + '/' + k + '.meta', 'w+') as f:
+                for vv in v:
+                    f.write(vv.encode('utf-8'))
+                    f.write("\n")
                 f.flush()
-                f.close()
 
     def _mkdir(self, path, mode=755):
         if os.path.exists(path):
@@ -207,29 +247,37 @@ def parser_ini(cfg):
 
 if __name__ == '__main__':
     p = parser(*sys.argv[1:])
+    cp = p.config
+    dp = p.data
     if p.config is None:
-        logger.error('config file is None')
-        exit(1)
+        logger.warn('config file is None,use default file config.ini')
+        cp = os.path.join(os.getcwd(), 'config.ini')
     if p.data is None:
-        logger.error('data path is None')
-        exit(1)
-    if not os.path.exists(p.config) or not os.path.exists(p.data):
+        logger.warn('data path is None, use default path is ' + os.getcwd())
+        dp = os.getcwd()
+    if not os.path.exists(cp) or not os.path.exists(dp):
         logger.error('config file or data path is not exist')
-        exit(1)
-    ini = parser_ini(p.config)
+        os._exit(1)
+    ini = parser_ini(cp)
     users = dict()
     for item in ini.get('mailer', 'users').split(','):
         arr = item.split(':')
         if len(arr) < 2:
             continue
-        users[arr[0]] = arr[1]
+        # if share mode
+        if '(' in arr[0] and ')' in arr[0]:
+            uu = arr[0].split('(')[1].split(')')[0].split('|')
+            for u in uu:
+                users[u] = arr[1]
+        else:
+            #if standard
+            users[arr[0]] = arr[1]
+
     mapping = dict()
-    for item in ini.get('mailer', 'groups').split(','):
-        arr = item.split(':')
-        if len(arr) < 2:
-            continue
-        mapping[arr[0]] = arr[1].split(';')
+    groups = ini.options('group')
+    for g in groups:
+        mapping[g] = ini.get('group', g).split(',')
     imap = ini.get('mailer', 'imap')
     ssl = ini.getboolean('mailer', 'ssl')
-    m = Mailer(root=p.data, imap=imap, ssl=ssl, groups=mapping, **users)
+    m = Mailer(root=dp, imap=imap, ssl=ssl, groups=mapping, **users)
     m.download()
