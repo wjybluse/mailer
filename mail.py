@@ -23,7 +23,7 @@ logger.addHandler(ch)
 
 
 class Mailer():
-    def __init__(self, root=None, imap=None, ssl=False, **users):
+    def __init__(self, root=None, imap=None, ssl=False, groups=None, **users):
         self.root = root
         self.imap = imap
         self.users = users
@@ -31,6 +31,7 @@ class Mailer():
         self.host = None
         self.port = 143
         self.cache = None
+        self.groups = groups
 
     def _list_all_clients(self):
         hosts = self.imap.split(':')
@@ -42,12 +43,23 @@ class Mailer():
             try:
                 conn = IMAPClient(
                     self.host, port=self.port, ssl=self.ssl, use_uid=True)
+                #if 163 imap server
+                if self.host == 'imap.163.com':
+                    conn.id_(
+                        parameters={
+                            'name': 'NeteaseFlashMail',
+                            'version': '2.4.1.30',
+                            'os': 'windows',
+                            'os-version': '6.1.7601',
+                            'vendor': 'NetEase,Inc.',
+                            'support-url': 'mailclient@188.com'
+                        })
                 conn.login(u, p)
                 cache[u] = conn
                 return cache
             except Exception as e:
                 logger.error('create imap client failed %s', e.message)
-                raise 'Connection error ' + e.message
+                raise IOError(e.message)
 
     def _list_mailbox(self, conn):
         mailboxes = []
@@ -73,16 +85,18 @@ class Mailer():
                 end = index + 100
                 if len(messages) < end:
                     end = len(messages)
-                response = conn.fetch(messages[index:end], ['RFC822'])
+                #unmark read message
+                response = conn.fetch(messages[index:end], ['BODY.PEEK[]'])
                 index = end
                 for msg_id, data in response.items():
                     self._handle(user, name, msg_id, data)
         else:
-            response = conn.fetch(messages[ii:], ['RFC822'])
+            response = conn.fetch(messages[ii:], ['BODY.PEEK[]'])
             for msg_id, data in response.items():
                 self._handle(user, name, msg_id, data)
-        self.cache[u'{0}-{1}'.format(user, name)] = messages[-1]
-        conn.unselect_folder()
+        if len(messages) > 0:
+            self.cache[u'{0}-{1}'.format(user, name)] = messages[-1]
+        #conn.unselect_folder()
 
     def _get_index(self, start, messages):
         for index in range(0, messages):
@@ -93,7 +107,8 @@ class Mailer():
         return 0
 
     def _handle(self, user, name, msg_id, data):
-        msg = email.message_from_string(data['RFC822'])
+        #RFC822
+        msg = email.message_from_string(data['BODY[]'])
         text, encoding = email.header.decode_header(msg['Subject'])[0]
         if encoding is None:
             encoding = 'gb2312'
@@ -102,7 +117,7 @@ class Mailer():
         _date = datetime.datetime.fromtimestamp(
             time.mktime(email.utils.parsedate(msg.get('date'))))
         self._save(user, name, _date, msg_id, text.decode(encoding),
-                   data['RFC822'])
+                   data['BODY[]'])
 
     def download(self):
         self.cache = self._load_meta()
@@ -116,10 +131,10 @@ class Mailer():
         self._flush_meta()
 
     def _save(self, user, mbox, _date, uid, subject, data):
-        self._mkdir(self.root, mode=755)
-        p = u'{0}/email/{1}/{2}/{3}'.format(self.root, user, mbox,
-                                            _date.strftime('%y-%m-%d'))
-        self._mkdir(p, mode=755)
+        self._mkdir(self.root, mode=777)
+        p = u'{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
+                                            mbox, _date.strftime('%y-%m-%d'))
+        self._mkdir(p, mode=777)
         eml = u'{0}/{1}-{2}.eml'.format(p, uid, subject)
         try:
             with open(eml, 'wb') as f:
@@ -134,7 +149,7 @@ class Mailer():
 
     def _load_meta(self):
         mp = u'{0}/.meta'.format(self.root)
-        self._mkdir(mp, mode=755)
+        self._mkdir(mp, mode=777)
         cache = {}
         for f in os.listdir(mp):
             with open(mp + '/' + f, 'r') as ff:
@@ -165,6 +180,15 @@ class Mailer():
         if os.path.exists(path):
             return
         os.makedirs(path, mode)
+
+    def _get_dir(self, user):
+        if self.groups is None:
+            return user
+        for g, emails in self.groups.items():
+            for e in emails:
+                if e == user:
+                    return '{0}/{1}'.format(g, user)
+        return user
 
 
 def parser(*args):
@@ -207,5 +231,5 @@ if __name__ == '__main__':
         mapping[arr[0]] = arr[1].split(';')
     imap = ini.get('mailer', 'imap')
     ssl = ini.getboolean('mailer', 'ssl')
-    m = Mailer(root=p.data, imap=imap, ssl=ssl, **users)
+    m = Mailer(root=p.data, imap=imap, ssl=ssl, groups=mapping, **users)
     m.download()
