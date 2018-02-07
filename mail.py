@@ -127,6 +127,8 @@ class Mailer():
                     sys.stdout.flush()
                     self._handle(user, name, msg_id, data)
                     time.sleep(0.1)
+                self.cache[u'{0}-{1}'.format(user, name)] = messages[end]
+                self._flush_meta()
         else:
             response = conn.fetch(messages[ii:], ['BODY.PEEK[]'])
             for msg_id, data in response.items():
@@ -135,8 +137,8 @@ class Mailer():
                 sys.stdout.flush()
                 self._handle(user, name, msg_id, data)
                 time.sleep(0.1)
-        if len(messages) > 0:
             self.cache[u'{0}-{1}'.format(user, name)] = messages[-1]
+            self._flush_meta()
         sys.stdout.write("\n")
         #conn.unselect_folder()
     def _get_index(self, start, messages):
