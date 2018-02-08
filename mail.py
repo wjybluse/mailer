@@ -65,21 +65,10 @@ class Mailer():
             try:
                 conn = IMAPClient(
                     self.host, port=self.port, ssl=self.ssl, use_uid=True)
-                #if 163 imap server
-                if self.host == 'imap.163.com':
-                    conn.id_(
-                        parameters={
-                            'name': 'NeteaseFlashMail',
-                            'version': '2.4.1.30',
-                            'os': 'windows',
-                            'os-version': '6.1.7601',
-                            'vendor': 'NetEase,Inc.',
-                            'support-url': 'mailclient@188.com'
-                        })
                 conn.login(u, p)
                 cache[u] = conn
             except Exception as e:
-                logger.error('create imap client failed %s', e.message)
+                logger.error('create imap client failed %s', e)
                 raise IOError(e.message)
         #return all clients
         return cache
@@ -98,7 +87,7 @@ class Mailer():
         _key = u'{0}-{1}'.format(user, name)
         _history = self.cache.get(_key, None)
         _download_list = messages
-        index = 0  
+        index = 0
         if _history is None:
             #download list
             self.cache[_key] = set()
@@ -108,7 +97,7 @@ class Mailer():
         else:
             _download_list = list(set(messages).difference(set(_history)))
             _download_list.reverse()
-        if len(_download_list)<=0:
+        if len(_download_list) <= 0:
             #nothing to do
             logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!', user,
                         name)
@@ -123,7 +112,8 @@ class Mailer():
                 if len(_download_list) < end:
                     end = len(_download_list)
                 #unmark read message
-                response = conn.fetch(_download_list[index:end], ['BODY.PEEK[]'])
+                response = conn.fetch(_download_list[index:end],
+                                      ['BODY.PEEK[]'])
                 index = end
                 for msg_id, data in response.items():
                     old = old + 1
@@ -156,8 +146,14 @@ class Mailer():
             return
         _date = datetime.datetime.fromtimestamp(
             time.mktime(email.utils.parsedate(msg.get('date'))))
-        self._save(user, name, _date, msg_id, text.decode(encoding),
+        self._save(user, name, _date, msg_id, self._try_decode(text, encoding),
                    data['BODY[]'])
+
+    def _try_decode(self, name, encoding):
+        try:
+            return name.decode(encoding)
+        except Exception as e:
+            return 'InvalidEncodingFile'
 
     def download(self):
         self.cache = self._load_meta()
@@ -166,7 +162,7 @@ class Mailer():
         for u, c in clients.items():
             #self._wrap_download(c,u)
             handlers.append(
-               self.tp.apply_async(self._wrap_download, args=(c, u)))
+                self.tp.apply_async(self._wrap_download, args=(c, u)))
         #wait for ok
         for h in handlers:
             h.get()
@@ -198,27 +194,29 @@ class Mailer():
         cache = {}
         for f in os.listdir(mp):
             with open(mp + '/' + f, 'r') as ff:
-                cache[f.replace('.meta','')] = set([int(x) if x!='' else -10000 for x in str(ff.read()).split(',')])
+                cache[f.replace('.meta', '')] = set([
+                    int(x) if x != '' else -10000
+                    for x in str(ff.read()).split(',')
+                ])
         return cache
 
-    def _flush_meta(self,key=None):
+    def _flush_meta(self, key=None):
         mp = u'{0}/.meta'.format(self.root)
         self._mkdir(mp)
         self._hidden(mp)
         if key is not None:
-            value = self.cache.get(key,None)
+            value = self.cache.get(key, None)
             if value is None:
                 return
-            with open(mp+'/'+key+'.meta','w+') as f:
+            with open(mp + '/' + key + '.meta', 'w+') as f:
                 f.write(','.join(str(x) for x in value))
                 f.flush()
         else:
             #flush all
             for k, v in self.cache.items():
-                with open(mp+'/'+k+'.meta', 'w+') as f:
+                with open(mp + '/' + k + '.meta', 'w+') as f:
                     f.write(','.join(str(x) for x in v))
                     f.flush()
-        
 
     def _hidden(self, path):
         if os.name == 'nt':
