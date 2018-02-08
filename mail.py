@@ -42,6 +42,7 @@ class Mailer():
                  groups=None,
                  poolsize=0x0a,
                  pagesize=0x64,
+                 timeout=None,
                  **users):
         self.root = root
         self.imap = imap
@@ -52,6 +53,7 @@ class Mailer():
         self.cache = None
         self.groups = groups
         self.pagesize = pagesize
+        self.timeout = timeout
         #the max size is 10
         self.tp = ThreadPool(poolsize)
 
@@ -64,7 +66,11 @@ class Mailer():
         for u, p in self.users.items():
             try:
                 conn = IMAPClient(
-                    self.host, port=self.port, ssl=self.ssl, use_uid=True)
+                    self.host,
+                    port=self.port,
+                    ssl=self.ssl,
+                    use_uid=True,
+                    timeout=self.timeout)
                 conn.login(u, p)
                 cache[u] = conn
             except Exception as e:
@@ -303,5 +309,7 @@ if __name__ == '__main__':
         groups=mapping,
         pagesize=pagesize,
         poolsize=poolsize,
+        timeout=3000 if ini.getint('mailer', 'timeout') == 0 else ini.getint(
+            'mailer', 'timeout'),
         **users)
     m.download()
