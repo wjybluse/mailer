@@ -17,7 +17,7 @@ logger = logging.getLogger('mailer')
 
 #set to stdout
 ch = logging.FileHandler('mailer.log')
-ch.setLevel(logging.INFO)
+ch.setLevel(logging.ERROR)
 formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
@@ -359,6 +359,9 @@ def parser(*args):
     #two args
     p.add_argument('-c', '--config', help='special config file')
     p.add_argument('-p', '--data', help='where data to store')
+    p.add_argument('--debug', help='set log level to debug')
+    p.add_argument('--info', help='set log level to info')
+    p.add_argument('--warn', help='set log level to warn')
     return p.parse_args(args)
 
 
@@ -372,6 +375,13 @@ if __name__ == '__main__':
     p = parser(*sys.argv[1:])
     cp = p.config
     dp = p.data
+    #set logger level
+    if p.debug:
+        ch.setLevel(logging.DEBUG)
+    if p.info:
+        ch.setLevel(logging.INFO)
+    if p.warn:
+        ch.setLevel(logging.WARNING)
     if p.config is None:
         logger.warn('config file is None,use default file config.ini')
         cp = os.path.join(os.getcwd(), 'config.ini')
