@@ -13,11 +13,11 @@ from imapclient import IMAPClient
 from multiprocessing.pool import ThreadPool
 
 logger = logging.getLogger('mailer')
-logger.setLevel(logging.DEBUG)
+#logger.setLevel(logging.DEBUG)
 
 #set to stdout
 ch = logging.FileHandler('mailer.log')
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.INFO)
 formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
@@ -56,6 +56,8 @@ class Mailer():
         self.timeout = timeout
         #the max size is 10
         self.tp = ThreadPool(poolsize)
+        #don,t use lock
+        self.summary = {}
 
     def _list_all_clients(self):
         hosts = self.imap.split(':')
@@ -75,7 +77,8 @@ class Mailer():
                 cache[u] = conn
             except Exception as e:
                 logger.error('create imap client failed %s', e)
-                raise IOError(e.message)
+                if 'LOGIN' in e.message:
+                    self._save_login_failed(u, p)
         #return all clients
         return cache
 
@@ -118,6 +121,8 @@ class Mailer():
                 if len(_download_list) < end:
                     end = len(_download_list)
                 #unmark read message
+                logger.info('begin to download %s .....',
+                            _download_list[index:end])
                 response = conn.fetch(_download_list[index:end],
                                       ['BODY.PEEK[]'])
                 index = end
@@ -130,6 +135,7 @@ class Mailer():
                 self.cache[_key].update(_download_list[0:end])
                 self._flush_meta(key=_key)
         else:
+            logger.info('begin to download %s .....', _download_list)
             response = conn.fetch(_download_list, ['BODY.PEEK[]'])
             for msg_id, data in response.items():
                 index = index + 1
@@ -145,6 +151,16 @@ class Mailer():
     def _handle(self, user, name, msg_id, data):
         #RFC822
         msg = email.message_from_string(data['BODY[]'])
+        _from = [] if msg.get_all('from') is None else msg.get_all('from')
+        _to = [] if msg.get_all('to') is None else msg.get_all('to')
+        _bcc = [] if msg.get_all('bcc') is None else msg.get_all('bcc')
+        _cc = [] if msg.get_all('cc') is None else msg.get_all('cc')
+        _s_key = u'{0}/发件人'.format(user)
+        self._update_record(_s_key, *_from)
+        _to.extend(_cc)
+        _to.extend(_bcc)
+        _r_key = u'{0}/收件人'.format(user)
+        self._update_record(_r_key, *set(_to))
         text, encoding = email.header.decode_header(msg['Subject'])[0]
         if encoding is None:
             encoding = 'gb2312'
@@ -154,6 +170,7 @@ class Mailer():
             time.mktime(email.utils.parsedate(msg.get('date'))))
         self._save(user, name, _date, msg_id, self._try_decode(text, encoding),
                    data['BODY[]'])
+        self._flush_summary(_r_key, _s_key)
 
     def _try_decode(self, name, encoding):
         try:
@@ -175,9 +192,12 @@ class Mailer():
         self._flush_meta()
 
     def _wrap_download(self, c, u):
-        boxes = self._list_mailbox(c)
-        for b in boxes:
-            self._download(u, b, c)
+        try:
+            boxes = self._list_mailbox(c)
+            for b in boxes:
+                self._download(u, b, c)
+        except Exception as e:
+            logger.error('handle error message %s', e)
 
     def _save(self, user, mbox, _date, uid, subject, data):
         self._mkdir(self.root, mode=0777)
@@ -190,9 +210,29 @@ class Mailer():
                 f.write(data)
                 f.flush()
         except IOError as e:
-            logger.error('write file failed %s', e.message)
+            #full path
+            logger.error('write file failed ,path is %s,id is %s ,error:%s', p,
+                         uid, e)
             #save again
             self._save(user, mbox, _date, uid, 'InvalidFile', data)
+
+    def _save_login_failed(self, user, password):
+        _pp = u'{0}/summary/登陆失败'.format(self.root)
+        self._mkdir(_pp)
+        try:
+            _list = set()
+            if os.path.exists(u'{0}/content.txt'.format(_pp)):
+                with open(u'{0}/content.txt'.format(_pp), 'r+') as f:
+                    for line in f.readlines():
+                        _list.add(line)
+            if _list.__contains__('{0}:{1}'.format(user, password)):
+                return
+            _list.add(u'{0}:{1}'.format(user, password))
+            with open(u'{0}/content.txt'.format(_pp), 'w+') as f:
+                f.write('\n'.join(_list))
+                f.flush()
+        except Exception as e:
+            logger.error('save file error %s', e.message)
 
     def _load_meta(self):
         mp = u'{0}/.meta'.format(self.root)
@@ -204,7 +244,30 @@ class Mailer():
                     int(x) if x != '' else -10000
                     for x in str(ff.read()).split(',')
                 ])
+        logger.info('load meta file ok')
         return cache
+
+    def _load_summary(self):
+        path = u'{0}/summary'.format(self.root)
+        self._mkdir(path)
+        for u in self.users:
+            up = path + '/' + u
+            if not os.path.exists(up):
+                continue
+            for f in os.listdir(up):
+                self.summary[f] = self._read_summary(
+                    os.path.join(up, f, u'汇总文件.txt'))
+        logger.info('load summary file ok')
+
+    def _read_summary(self, path):
+        _s = {}
+        with open(path, 'r') as f:
+            for line in f.readlines():
+                arr = line.split(':')
+                if len(arr) < 2:
+                    continue
+                _s[arr[0]] = arr[1]
+        return _s
 
     def _flush_meta(self, key=None):
         mp = u'{0}/.meta'.format(self.root)
@@ -223,6 +286,47 @@ class Mailer():
                 with open(mp + '/' + k + '.meta', 'w+') as f:
                     f.write(','.join(str(x) for x in v))
                     f.flush()
+
+    def _flush_summary(self, *args):
+        for _key in args:
+            #parser key
+            record = self.summary.get(_key)
+            if record is None:
+                continue
+            #clean code, value is map
+            self._save_summary(_key, '\n'.join(
+                ['{0}:{1}'.format(k, v) for k, v in record.items()]))
+
+    def _parser_mail(self, mail):
+        #fuck email address
+        if not '<' in mail:
+            hh, _ = email.header.decode_header(mail)[0]
+            return hh
+        return mail.split('<')[1].split('>')[0]
+
+    #save summary
+    def _save_summary(self, path_suffix, content):
+        path = u'{0}/summary/{1}'.format(self.root, path_suffix)
+        self._mkdir(path)
+        with open(u'{0}/汇总文件.txt'.format(path), 'w+') as f:
+            f.write(content)
+            f.flush()
+
+    def _update_record(self, _key, *args):
+        record = self.summary.get(_key)
+        if record is None:
+            self.summary[_key] = {}
+            record = self.summary[_key]
+        for u in args:
+            if u is None or u.strip() == '':
+                continue
+            uu = self._parser_mail(u)
+            if uu is None or uu.strip() == '':
+                continue
+            value = record.get(uu, None)
+            if value is None:
+                record[uu] = 0
+            record[uu] += 1
 
     def _hidden(self, path):
         if os.name == 'nt':
