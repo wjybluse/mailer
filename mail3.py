@@ -7,10 +7,11 @@ import datetime
 import time
 import logging
 import argparse
-import ConfigParser
+import configparser
 import sys
 from imapclient import IMAPClient
-from multiprocessing.pool import ThreadPool
+import asyncio
+import imaplib
 
 logger = logging.getLogger('mailer')
 #logger.setLevel(logging.DEBUG)
@@ -40,7 +41,6 @@ class Mailer():
                  imap=None,
                  ssl=False,
                  groups=None,
-                 poolsize=0x0a,
                  pagesize=0x64,
                  timeout=None,
                  **users):
@@ -55,7 +55,8 @@ class Mailer():
         self.pagesize = pagesize
         self.timeout = timeout
         #the max size is 10
-        self.tp = ThreadPool(poolsize)
+        #start event loop
+        self.loop = asyncio.get_event_loop()
         #don,t use lock
         self.summary = {}
 
@@ -65,7 +66,10 @@ class Mailer():
         if len(hosts) >= 2:
             self.port = hosts[1]
         cache = {}
-        for u, p in self.users.items():
+        if '163' in self.host:
+            imaplib._MAXLINE = 100000000
+            imaplib._FORCE_HEADER = True
+        for u, p in list(self.users.items()):
             try:
                 conn = IMAPClient(
                     self.host,
@@ -77,7 +81,7 @@ class Mailer():
                 cache[u] = conn
             except Exception as e:
                 logger.error('create imap client failed %s', e)
-                if 'LOGIN' in e.message:
+                if 'LOGIN' in str(e):
                     self._save_login_failed(u, p)
         #return all clients
         return cache
@@ -93,7 +97,7 @@ class Mailer():
         conn.select_folder(name)
         messages = conn.search()
         #split for many segment
-        _key = u'{0}-{1}'.format(user, name)
+        _key = '{0}-{1}'.format(user, name)
         _history = self.cache.get(_key, None)
         _download_list = messages
         index = 0
@@ -111,7 +115,7 @@ class Mailer():
             logger.warn('Email(%s[%s]) NO NEW MESSAGE TO BE RECEIVED!!', user,
                         name)
             return
-        print('\n' + self._get_dir(user) + '/' + name + ':')
+        print(('\n' + self._get_dir(user) + '/' + name + ':'))
         sys.stdout.write("\r%d/%d" % (index, len(_download_list)))
         sys.stdout.flush()
         if len(_download_list) > self.pagesize:
@@ -126,7 +130,7 @@ class Mailer():
                 response = conn.fetch(_download_list[index:end],
                                       ['BODY.PEEK[]'])
                 index = end
-                for msg_id, data in response.items():
+                for msg_id, data in list(response.items()):
                     old = old + 1
                     sys.stdout.write("\r%d/%d" % (old, len(_download_list)))
                     sys.stdout.flush()
@@ -137,7 +141,7 @@ class Mailer():
         else:
             logger.info('begin to download %s .....', _download_list)
             response = conn.fetch(_download_list, ['BODY.PEEK[]'])
-            for msg_id, data in response.items():
+            for msg_id, data in list(response.items()):
                 index = index + 1
                 sys.stdout.write("\r%d/%d" % (index, len(_download_list)))
                 sys.stdout.flush()
@@ -150,21 +154,23 @@ class Mailer():
         #conn.unselect_folder()
 
     def _handle(self, user, name, msg_id, data):
-        if data['BODY[]'] is None or data['BODY[]'].strip() == '':
+        body = data.get(b'BODY[]', None)
+        if body is None or str(body).strip() == '':
             logger.info('body is empty, skip, id is %s,name is %s', msg_id,
                         name)
             return
         #RFC822
-        msg = email.message_from_string(data['BODY[]'])
+        msg = email.message_from_bytes(body)
+        logger.info('msg is %s', msg)
         _from = [] if msg.get_all('from') is None else msg.get_all('from')
         _to = [] if msg.get_all('to') is None else msg.get_all('to')
         _bcc = [] if msg.get_all('bcc') is None else msg.get_all('bcc')
         _cc = [] if msg.get_all('cc') is None else msg.get_all('cc')
-        _s_key = u'{0}/发件人'.format(user)
+        _s_key = '{0}/发件人'.format(user)
         self._update_record(_s_key, *_from)
         _to.extend(_cc)
         _to.extend(_bcc)
-        _r_key = u'{0}/收件人'.format(user)
+        _r_key = '{0}/收件人'.format(user)
         self._update_record(_r_key, *set(_to))
         text, encoding = email.header.decode_header(msg['Subject'])[0]
         if encoding is None:
@@ -177,35 +183,35 @@ class Mailer():
             _date = datetime.datetime.fromtimestamp(
                 time.mktime(email.utils.parsedate(msg.get('date'))))
         self._save(user, name, _date, msg_id, self._try_decode(text, encoding),
-                   data['BODY[]'])
+                   data[b'BODY[]'])
         self._flush_summary(_r_key, _s_key)
 
     def _try_decode(self, name, encoding):
         try:
             return name.decode(encoding)
         except Exception as e:
+            logger.info('encode name failed %s', e)
             return 'InvalidEncodingFile'
 
     def download(self):
         self.cache = self._load_meta()
         clients = self._list_all_clients()
         handlers = []
-        for u, c in clients.items():
+        for u, c in list(clients.items()):
             #self._wrap_download(c,u)
-            handlers.append(
-                self.tp.apply_async(self._wrap_download, args=(c, u)))
+            handlers.append(self._wrap_download(c, u))
         #wait for ok
-        for h in handlers:
-            h.get()
+        self.loop.run_until_complete(asyncio.gather(*handlers))
+        self.loop.close()
         self._flush_meta()
 
-    def _wrap_download(self, c, u):
+    async def _wrap_download(self, c, u):
         try:
             boxes = self._list_mailbox(c)
             for b in boxes:
                 self._download(u, b, c)
         except Exception as e:
-            if 'Autologout' in e.message:
+            if 'Autologout' in str(e):
                 logger.info('time expire ,auto login')
                 #relogin
                 c = IMAPClient(
@@ -219,12 +225,12 @@ class Mailer():
             logger.error('handle error message %s', e)
 
     def _save(self, user, mbox, _date, uid, subject, data):
-        self._mkdir(self.root, mode=0777)
-        p = u'{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
-                                            mbox, _date.strftime('%Y-%m-%d'))
-        self._mkdir(p, mode=0777)
+        self._mkdir(self.root, mode=0o777)
+        p = '{0}/email/{1}/{2}/{3}'.format(self.root, self._get_dir(user),
+                                           mbox, _date.strftime('%Y-%m-%d'))
+        self._mkdir(p, mode=0o777)
         p = os.path.normpath(p)
-        eml = u'{0}/{1}-{2}.eml'.format(p, uid, _fix_name(subject))
+        eml = '{0}/{1}-{2}.eml'.format(p, uid, _fix_name(subject))
         eml = os.path.normpath(eml)
         try:
             with open(eml, 'wb') as f:
@@ -238,26 +244,26 @@ class Mailer():
             self._save(user, mbox, _date, uid, 'InvalidFile', data)
 
     def _save_login_failed(self, user, password):
-        _pp = u'{0}/summary/登陆失败'.format(self.root)
+        _pp = '{0}/summary/登陆失败'.format(self.root)
         self._mkdir(_pp)
         try:
             _list = set()
-            if os.path.exists(u'{0}/content.txt'.format(_pp)):
-                with open(u'{0}/content.txt'.format(_pp), 'r+') as f:
+            if os.path.exists('{0}/content.txt'.format(_pp)):
+                with open('{0}/content.txt'.format(_pp), 'r+') as f:
                     for line in f.readlines():
                         _list.add(line)
             if _list.__contains__('{0}:{1}'.format(user, password)):
                 return
-            _list.add(u'{0}:{1}'.format(user, password))
-            with open(u'{0}/content.txt'.format(_pp), 'w+') as f:
+            _list.add('{0}:{1}'.format(user, password))
+            with open('{0}/content.txt'.format(_pp), 'w+') as f:
                 f.write('\n'.join(_list))
                 f.flush()
         except Exception as e:
-            logger.error('save file error %s', e.message)
+            logger.error('save file error %s', e)
 
     def _load_meta(self):
-        mp = u'{0}/.meta'.format(self.root)
-        self._mkdir(mp, mode=0777)
+        mp = '{0}/.meta'.format(self.root)
+        self._mkdir(mp, mode=0o777)
         cache = {}
         for f in os.listdir(mp):
             with open(mp + '/' + f, 'r') as ff:
@@ -269,7 +275,7 @@ class Mailer():
         return cache
 
     def _load_summary(self):
-        path = u'{0}/summary'.format(self.root)
+        path = '{0}/summary'.format(self.root)
         self._mkdir(path)
         self._hidden(path)
         for u in self.users:
@@ -278,7 +284,7 @@ class Mailer():
                 continue
             for f in os.listdir(up):
                 self.summary[f] = self._read_summary(
-                    os.path.join(up, f, u'汇总文件.txt'))
+                    os.path.join(up, f, '汇总文件.txt'))
         logger.info('load summary file ok')
 
     def _read_summary(self, path):
@@ -292,7 +298,7 @@ class Mailer():
         return _s
 
     def _flush_meta(self, key=None):
-        mp = u'{0}/.meta'.format(self.root)
+        mp = '{0}/.meta'.format(self.root)
         self._mkdir(mp)
         self._hidden(mp)
         if key is not None:
@@ -304,7 +310,7 @@ class Mailer():
                 f.flush()
         else:
             #flush all
-            for k, v in self.cache.items():
+            for k, v in list(self.cache.items()):
                 with open(mp + '/' + k.replace('/', '--') + '.meta',
                           'w+') as f:
                     f.write(','.join(str(x) for x in v))
@@ -318,7 +324,7 @@ class Mailer():
                 continue
             #clean code, value is map
             self._save_summary(_key, '\n'.join(
-                ['{0}:{1}'.format(k, v) for k, v in record.items()]))
+                ['{0}:{1}'.format(k, v) for k, v in list(record.items())]))
 
     def _parser_mail(self, mail):
         #fuck email address
@@ -329,10 +335,10 @@ class Mailer():
 
     #save summary
     def _save_summary(self, path_suffix, content):
-        path = u'{0}/summary/{1}'.format(self.root, path_suffix)
+        path = '{0}/summary/{1}'.format(self.root, path_suffix)
         self._mkdir(path)
         self._hidden(path)
-        with open(u'{0}/汇总文件.txt'.format(path), 'w+') as f:
+        with open('{0}/汇总文件.txt'.format(path), 'w+') as f:
             f.write(content)
             f.flush()
 
@@ -356,14 +362,14 @@ class Mailer():
         if os.name == 'nt':
             import ctypes
             ret = ctypes.windll.kernel32.SetFileAttributesW(
-                ur'{0}'.format(path), FILE_ATTRIBUTE_HIDDEN)
+                r'{0}'.format(path), FILE_ATTRIBUTE_HIDDEN)
             if ret:
                 logger.debug('hidden success')
         #do nothing
         else:
             logger.debug('os is unix like system, do nothing')
 
-    def _mkdir(self, path, mode=0777):
+    def _mkdir(self, path, mode=0o777):
         if os.path.exists(path):
             return
         os.makedirs(path, mode)
@@ -371,7 +377,7 @@ class Mailer():
     def _get_dir(self, user):
         if self.groups is None:
             return user
-        for g, emails in self.groups.items():
+        for g, emails in list(self.groups.items()):
             for e in emails:
                 if e == user:
                     return '{0}/{1}'.format(g, user)
@@ -390,8 +396,8 @@ def parser(*args):
 
 
 def parser_ini(cfg):
-    cp = ConfigParser.ConfigParser()
-    cp.readfp(open(cfg, 'r'))
+    cp = configparser.ConfigParser()
+    cp.readfp(open(cfg, 'r', encoding='utf-8'))
     return cp
 
 
@@ -446,7 +452,6 @@ if __name__ == '__main__':
         ssl=ssl,
         groups=mapping,
         pagesize=pagesize,
-        poolsize=poolsize,
         timeout=3000 if ini.getint('mailer', 'timeout') == 0 else ini.getint(
             'mailer', 'timeout'),
         **users)
